@@ -26,7 +26,7 @@ typedef struct
     bool debug;
     bool running;
     char cwd[FILENAME_MAX];
-    char prompt[];
+    char *prompt;
 } sebsh;
 
 typedef struct
@@ -141,7 +141,7 @@ CommandInfo parse_input(char *input_str)
     return info;
 }
 
-bool arg_matches(char argvi[], char shortarg[], char longarg[])
+bool arg_matches(char *argvi, char *shortarg, char *longarg)
 {
     if (shortarg != NULL && (strcmp(argvi, shortarg) == 0))
     {
@@ -258,13 +258,11 @@ char *join_args(int argc, char **argv, int i)
 int main(int argc, char *argv[])
 {
     sebsh state = {
-        .debug = false,
         .running = true,
+        .debug = false,
         .cwd = {0},
         .prompt = " #> "};
 
-    state.running = true;
-    state.debug = false;
     char command[CMD_SIZE];
     CommandInfo result;
 
