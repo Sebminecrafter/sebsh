@@ -18,7 +18,7 @@
 #endif
 
 #define VER "1.0.0"
-#define CMD_SIZE 1000
+#define CMD_SIZE 4096
 #define MAX_ARGS 100
 
 bool debug = false;
@@ -84,30 +84,59 @@ CommandInfo parse_input(char *input_str)
     info.command = NULL;
     info.arg_count = 0;
 
-    char *token = strtok(input_str, " ");
-    if (token != NULL)
-    {
-        info.command = trim(token);
-        info.args[info.arg_count++] = info.command;
+    char *p = input_str;
 
-        while (info.arg_count < MAX_ARGS - 1)
+    while (*p != '\0' && info.arg_count < MAX_ARGS - 1)
+    {
+        // Skip whitespace
+        while (isspace((unsigned char)*p))
+            p++;
+        if (*p == '\0')
+            break;
+
+        // Mark start of token
+        char *token_start = p;
+        char *write = p;
+
+        while (*p != '\0')
         {
-            token = strtok(NULL, " ");
-            if (token == NULL)
-                break;
-            info.args[info.arg_count++] = token;
+            if (*p == '"' || *p == '\'')
+            {
+                // Enter quoted section, skip opening quote
+                char quote = *p++;
+                while (*p != '\0' && *p != quote)
+                    *write++ = *p++;
+                if (*p == quote)
+                    p++; // skip closing quote
+            }
+            else if (isspace((unsigned char)*p))
+            {
+                break; // end of token
+            }
+            else
+            {
+                *write++ = *p++;
+            }
         }
-        info.args[info.arg_count] = NULL;
+        *write = '\0'; // null-terminate token
+
+        if (write > token_start || p > token_start)
+        {
+            if (info.arg_count == 0)
+                info.command = token_start;
+            info.args[info.arg_count++] = token_start;
+        }
+
+        if (isspace((unsigned char)*p))
+            p++; // step past space that ended token
     }
+
+    info.args[info.arg_count] = NULL;
     return info;
 }
 
-bool arg_matches(char argvi[], char single[], char shortarg[], char longarg[])
+bool arg_matches(char argvi[], char shortarg[], char longarg[])
 {
-    if (single != NULL && (strcmp(argvi, single) == 0))
-    {
-        return true;
-    }
     if (shortarg != NULL && (strcmp(argvi, shortarg) == 0))
     {
         return true;
@@ -126,7 +155,7 @@ void about_command()
 
 void help_command()
 {
-    printf("sebsh - builtin commands:\n", VER);
+    printf("sebsh - builtin commands:\n");
     printf("  help        show this help message\n");
     printf("  ver         show version\n");
     printf("  exit/quit   exit the shell\n");
@@ -134,7 +163,7 @@ void help_command()
     printf("  debug       toggle debug messages\n");
 }
 
-void process_command(char *command, char *args[], bool *running)
+void process_command(char *command, char *args[], int arg_count, bool *running)
 {
     if (command == NULL)
         return;
@@ -142,7 +171,7 @@ void process_command(char *command, char *args[], bool *running)
     if (debug)
     {
         printf("Command is %s \n", command);
-        for (int i = 0; i < (sizeof(args[0]) / sizeof(args)); i++)
+        for (int i = 0; i < arg_count; i++)
         {
             printf("Arg %d: %s\n", i, args[i]);
         }
@@ -164,17 +193,23 @@ void process_command(char *command, char *args[], bool *running)
     else if (strcmp(command, "cd") == 0)
     {
         const char *dir = args[1];
+
         if (dir == NULL)
         {
-            perror("cd");
+            dir = getenv("HOME");
+            if (dir == NULL)
+            {
+                fprintf(stderr, "cd: HOME not set\n");
+                return;
+            }
         }
 #ifdef _WIN32
-        else if (_chdir(dir) != 0)
+        if (_chdir(dir) != 0)
         {
             perror("cd");
         }
 #else
-        else if (chdir(dir) != 0)
+        if (chdir(dir) != 0)
         {
             perror("cd");
         }
@@ -200,6 +235,11 @@ char *join_args(int argc, char **argv, int i)
 
     // Allocate buffer and concatenate
     char *res = calloc(len, 1);
+    if (res == NULL)
+    {
+        perror("calloc");
+        return NULL;
+    }
     for (int j = i; j < argc; j++)
     {
         strcat(res, argv[j]);
@@ -218,15 +258,28 @@ int main(int argc, char *argv[])
 
     for (int i = 1; i < argc; i++)
     {
-        if (arg_matches(argv[i], "version", "-v", "--version"))
+        if (arg_matches(argv[i], "-v", "--version"))
         {
             about_command();
             return 0;
         }
-        else if (arg_matches(argv[i], NULL, "-c", "--command"))
+        else if (arg_matches(argv[i], "-c", "--command"))
         {
-            result = parse_input(trim(join_args(argc, argv, i++)));
-            process_command(result.command, result.args, &running);
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "sebsh: -c requires a command\n");
+                return 1;
+            }
+            char *joined = join_args(argc, argv, i + 1);
+            if (joined == NULL)
+            {
+                running = false;
+                break;
+            }
+            result = parse_input(trim(joined));
+            i = argc;
+            process_command(result.command, result.args, result.arg_count, &running);
+            free(joined);
             running = false;
         }
         else
@@ -254,7 +307,7 @@ int main(int argc, char *argv[])
         result = parse_input(trim(command));
         if (result.command != NULL)
         {
-            process_command(result.command, result.args, &running);
+            process_command(result.command, result.args, result.arg_count, &running);
         }
         fflush(stdout);
     }
