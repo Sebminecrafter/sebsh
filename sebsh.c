@@ -25,7 +25,7 @@ typedef struct
 {
     bool debug;
     bool running;
-    char *cwd;
+    char *cwd[FILENAME_MAX];
 } sebsh;
 
 typedef struct
