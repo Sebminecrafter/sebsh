@@ -25,7 +25,8 @@ typedef struct
 {
     bool debug;
     bool running;
-    char *cwd[FILENAME_MAX];
+    char cwd[FILENAME_MAX];
+    char prompt[];
 } sebsh;
 
 typedef struct
@@ -168,12 +169,12 @@ void help_command()
     printf("  debug       toggle debug messages\n");
 }
 
-void process_command(char *command, char *args[], int arg_count, sebsh state)
+void process_command(char *command, char *args[], int arg_count, sebsh *state)
 {
     if (command == NULL)
         return;
 
-    if (state.debug)
+    if (state->debug)
     {
         printf("Command is %s \n", command);
         for (int i = 0; i < arg_count; i++)
@@ -193,7 +194,7 @@ void process_command(char *command, char *args[], int arg_count, sebsh state)
     else if (strcmp(command, "exit") == 0 || strcmp(command, "quit") == 0)
     {
         printf("exit\n");
-        state.running = false;
+        state->running = false;
     }
     else if (strcmp(command, "cd") == 0)
     {
@@ -222,8 +223,8 @@ void process_command(char *command, char *args[], int arg_count, sebsh state)
     }
     else if (strcmp(command, "debug") == 0)
     {
-        state.debug = !state.debug;
-        printf("Debug messages are now %s.\n", state.debug ? "enabled" : "disabled");
+        state->debug = !state->debug;
+        printf("Debug messages are now %s.\n", state->debug ? "enabled" : "disabled");
     }
     else
     {
@@ -259,7 +260,8 @@ int main(int argc, char *argv[])
     sebsh state = {
         .debug = false,
         .running = true,
-        .cwd = {0}};
+        .cwd = {0},
+        .prompt = " #> "};
 
     state.running = true;
     state.debug = false;
@@ -283,13 +285,12 @@ int main(int argc, char *argv[])
             char *joined = join_args(argc, argv, i + 1);
             if (joined == NULL)
             {
-                free(joined);
                 state.running = false;
                 break;
             }
             result = parse_input(trim(joined));
             i = argc;
-            process_command(result.command, result.args, result.arg_count, state);
+            process_command(result.command, result.args, result.arg_count, &state);
             free(joined);
             state.running = false;
         }
@@ -306,7 +307,7 @@ int main(int argc, char *argv[])
             perror("GETCWD");
             return 1;
         }
-        printf("%s> ", state.cwd);
+        printf("%s%s", state.cwd, state.prompt);
         fflush(stdout);
 
         if (fgets(command, sizeof(command), stdin) == NULL)
@@ -318,7 +319,7 @@ int main(int argc, char *argv[])
         result = parse_input(trim(command));
         if (result.command != NULL)
         {
-            process_command(result.command, result.args, result.arg_count, state);
+            process_command(result.command, result.args, result.arg_count, &state);
         }
         fflush(stdout);
     }
