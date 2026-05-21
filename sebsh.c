@@ -21,11 +21,7 @@
 #define CMD_SIZE 1000
 #define MAX_ARGS 100
 
-void err_at(const char *module)
-{
-    fprintf(stderr, "Error at ");
-    perror(module);
-}
+bool debug = false;
 
 // Cross-platform process spawn function
 int spawn_process(const char *path, char *const argv[])
@@ -34,20 +30,20 @@ int spawn_process(const char *path, char *const argv[])
     int result = _spawnvp(_P_WAIT, path, argv);
     if (result == -1)
     {
-        err_at("_spawnvp");
+        perror("_spawnvp");
     }
     return result;
 #else
     pid_t pid = fork();
     if (pid < 0)
     {
-        err_at("fork");
+        perror("fork");
         return -1;
     }
     else if (pid == 0)
     {
         execvp(path, argv);
-        err_at("execvp");
+        perror("execvp");
         exit(EXIT_FAILURE);
     }
     else
@@ -135,12 +131,22 @@ void help_command()
     printf("  ver         show version\n");
     printf("  exit/quit   exit the shell\n");
     printf("  cd <dir>    change directory\n");
+    printf("  debug       toggle debug messages\n");
 }
 
 void process_command(char *command, char *args[], bool *running)
 {
     if (command == NULL)
         return;
+
+    if (debug)
+    {
+        printf("Command is %s \n", command);
+        for (int i = 0; i < (sizeof(args[0]) / sizeof(args)); i++)
+        {
+            printf("Arg %d: %s\n", i, args[i]);
+        }
+    }
 
     if (strcmp(command, "help") == 0)
     {
@@ -160,19 +166,24 @@ void process_command(char *command, char *args[], bool *running)
         const char *dir = args[1];
         if (dir == NULL)
         {
-            err_at("cd");
+            perror("cd");
         }
 #ifdef _WIN32
         else if (_chdir(dir) != 0)
         {
-            err_at("cd");
+            perror("cd");
         }
 #else
         else if (chdir(dir) != 0)
         {
-            err_at("cd");
+            perror("cd");
         }
 #endif
+    }
+    else if (strcmp(command, "debug") == 0)
+    {
+        debug = !debug;
+        printf("Debug messages are now %s.\n", debug ? "enabled" : "disabled");
     }
     else
     {
@@ -228,7 +239,7 @@ int main(int argc, char *argv[])
     {
         if (GETCWD(cwd, sizeof(cwd)) == NULL)
         {
-            err_at("GETCWD");
+            perror("GETCWD");
             return 1;
         }
         printf("%s> ", cwd);
