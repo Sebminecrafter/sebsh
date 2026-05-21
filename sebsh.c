@@ -106,6 +106,37 @@ CommandInfo parse_input(char *input_str)
     return info;
 }
 
+bool arg_matches(char argvi[], char single[], char shortarg[], char longarg[])
+{
+    if (single != NULL && (strcmp(argvi, single) == 0))
+    {
+        return true;
+    }
+    if (shortarg != NULL && (strcmp(argvi, shortarg) == 0))
+    {
+        return true;
+    }
+    if (longarg != NULL && (strcmp(argvi, longarg) == 0))
+    {
+        return true;
+    }
+    return false;
+}
+
+void about_command()
+{
+    printf("sebsh %s\n", VER);
+}
+
+void help_command()
+{
+    printf("sebsh - builtin commands:\n", VER);
+    printf("  help        show this help message\n");
+    printf("  ver         show version\n");
+    printf("  exit/quit   exit the shell\n");
+    printf("  cd <dir>    change directory\n");
+}
+
 void process_command(char *command, char *args[], bool *running)
 {
     if (command == NULL)
@@ -113,19 +144,15 @@ void process_command(char *command, char *args[], bool *running)
 
     if (strcmp(command, "help") == 0)
     {
-        printf("sebsh %s - available commands:\n", VER);
-        printf("  help        show this help message\n");
-        printf("  ver         show version\n");
-        printf("  exit/quit   exit the shell\n");
-        printf("  cd <dir>    change directory\n");
-        printf("  <command>   run an external command\n");
+        help_command();
     }
     else if (strcmp(command, "ver") == 0)
     {
-        printf("sebsh %s\n", VER);
+        about_command();
     }
     else if (strcmp(command, "exit") == 0 || strcmp(command, "quit") == 0)
     {
+        printf("exit\n");
         *running = false;
     }
     else if (strcmp(command, "cd") == 0)
@@ -133,7 +160,7 @@ void process_command(char *command, char *args[], bool *running)
         const char *dir = args[1];
         if (dir == NULL)
         {
-            fprintf(stderr, "cd: missing argument\n");
+            err_at("cd");
         }
 #ifdef _WIN32
         else if (_chdir(dir) != 0)
@@ -153,6 +180,24 @@ void process_command(char *command, char *args[], bool *running)
     }
 }
 
+char *join_args(int argc, char **argv, int i)
+{
+    size_t len = 0;
+    // Calculate required memory (including spaces)
+    for (int j = i; j < argc; j++)
+        len += strlen(argv[j]) + 1;
+
+    // Allocate buffer and concatenate
+    char *res = calloc(len, 1);
+    for (int j = i; j < argc; j++)
+    {
+        strcat(res, argv[j]);
+        if (j < argc - 1)
+            strcat(res, " ");
+    }
+    return res;
+}
+
 int main(int argc, char *argv[])
 {
     bool running = true;
@@ -160,10 +205,23 @@ int main(int argc, char *argv[])
     char command[CMD_SIZE];
     CommandInfo result;
 
-    if (argc >= 2 && (strcmp(argv[1], "version") == 0 || strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0))
+    for (int i = 1; i < argc; i++)
     {
-        printf("sebsh %s\n", VER);
-        return 0;
+        if (arg_matches(argv[i], "version", "-v", "--version"))
+        {
+            about_command();
+            return 0;
+        }
+        else if (arg_matches(argv[i], NULL, "-c", "--command"))
+        {
+            result = parse_input(trim(join_args(argc, argv, i++)));
+            process_command(result.command, result.args, &running);
+            running = false;
+        }
+        else
+        {
+            fprintf(stderr, "sebsh: Too many or unknown argument(s)!\n");
+        }
     }
 
     while (running)
