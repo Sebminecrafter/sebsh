@@ -14,19 +14,21 @@
 #else
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #define GETCWD getcwd
 #endif
 
 #define VER "1.0.0"
 #define CMD_SIZE 4096
 #define MAX_ARGS 100
+#define MAX_PIPE_SEGMENTS 16
 
 typedef struct
 {
     bool debug;
     bool running;
     char cwd[FILENAME_MAX];
-    char *prompt;
+    const char *prompt;
 } sebsh;
 
 typedef struct
@@ -34,10 +36,13 @@ typedef struct
     char *command;
     char *args[MAX_ARGS];
     int arg_count;
+    char *redirect_in;     //
+    char *redirect_out;    // >
+    char *redirect_append; // >>
 } CommandInfo;
 
 // Cross-platform process spawn function
-int spawn_process(const char *path, char *const argv[])
+int spawn_process(const char *path, char *const argv[], const char *redirect_in, const char *redirect_out, const char *redirect_append)
 {
 #ifdef _WIN32
     int result = _spawnvp(_P_WAIT, path, argv);
@@ -53,20 +58,160 @@ int spawn_process(const char *path, char *const argv[])
         perror("fork");
         return -1;
     }
-    else if (pid == 0)
+    if (pid == 0)
     {
+        if (redirect_in)
+        {
+            int fd = open(redirect_in, O_RDONLY);
+            if (fd < 0)
+            {
+                perror(redirect_in);
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDIN_FILENO);
+            close(fd);
+        }
+        if (redirect_append)
+        {
+            int fd = open(redirect_append, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd < 0)
+            {
+                perror(redirect_append);
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        }
+        else if (redirect_out)
+        {
+            int fd = open(redirect_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd < 0)
+            {
+                perror(redirect_out);
+                exit(EXIT_FAILURE);
+            }
+            dup2(fd, STDOUT_FILENO);
+            close(fd);
+        }
         execvp(path, argv);
         perror("execvp");
         exit(EXIT_FAILURE);
     }
-    else
-    {
-        int status;
-        waitpid(pid, &status, 0);
-        return WEXITSTATUS(status);
-    }
+    int status;
+    waitpid(pid, &status, 0);
+    return WEXITSTATUS(status);
 #endif
 }
+
+int split_pipe(char *input, char *segments[], int max_segments)
+{
+    int count = 0;
+    bool in_single = false, in_double = false;
+    char *p = input;
+    segments[count++] = p;
+
+    while (*p != '\0' && count < max_segments)
+    {
+        if (*p == '\'' && !in_double)
+            in_single = !in_single;
+        else if (*p == '"' && !in_single)
+            in_double = !in_double;
+        else if (*p == '|' && !in_single && !in_double)
+        {
+            *p = '\0';
+            segments[count++] = p + 1;
+        }
+        p++;
+    }
+    segments[count] = NULL;
+    return count;
+}
+
+#ifndef _WIN32
+void execute_pipeline(CommandInfo *infos, int count)
+{
+    int pipes[MAX_PIPE_SEGMENTS - 1][2];
+
+    for (int i = 0; i < count - 1; i++)
+    {
+        if (pipe(pipes[i]) < 0)
+        {
+            perror("pipe");
+            return;
+        }
+    }
+
+    for (int i = 0; i < count; i++)
+    {
+        if (infos[i].command == NULL)
+            continue;
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            perror("fork");
+            return;
+        }
+        if (pid == 0)
+        {
+            if (i > 0)
+                dup2(pipes[i - 1][0], STDIN_FILENO);
+            else if (infos[i].redirect_in)
+            {
+                int fd = open(infos[i].redirect_in, O_RDONLY);
+                if (fd < 0)
+                {
+                    perror(infos[i].redirect_in);
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+
+            if (i < count - 1)
+                dup2(pipes[i][1], STDOUT_FILENO);
+            else if (infos[i].redirect_append)
+            {
+                int fd = open(infos[i].redirect_append, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd < 0)
+                {
+                    perror(infos[i].redirect_append);
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+            else if (infos[i].redirect_out)
+            {
+                int fd = open(infos[i].redirect_out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd < 0)
+                {
+                    perror(infos[i].redirect_out);
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd, STDOUT_FILENO);
+                close(fd);
+            }
+
+            for (int j = 0; j < count - 1; j++)
+            {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+            execvp(infos[i].command, infos[i].args);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    for (int i = 0; i < count - 1; i++)
+    {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
+    }
+    for (int i = 0; i < count; i++)
+        wait(NULL);
+}
+#endif
 
 char *trim(char *str)
 {
@@ -89,6 +234,9 @@ CommandInfo parse_input(char *input_str)
     CommandInfo info;
     info.command = NULL;
     info.arg_count = 0;
+    info.redirect_in = NULL;
+    info.redirect_out = NULL;
+    info.redirect_append = NULL;
 
     char *p = input_str;
 
@@ -106,23 +254,33 @@ CommandInfo parse_input(char *input_str)
 
         while (*p != '\0')
         {
-            if (*p == '"' || *p == '\'')
+            if (*p == '\\' && *(p + 1) != '\0' && !isspace((unsigned char)*(p + 1)))
             {
-                // Enter quoted section, skip opening quote
+                p++;             // skip backslash
+                *write++ = *p++; // copy next char literally
+            }
+            else if (*p == '"' || *p == '\'')
+            {
                 char quote = *p++;
-                while (*p != '\0' && *p != quote)
-                    *write++ = *p++;
+                while (*p != '\0')
+                {
+                    if (quote == '"' && *p == '\\' && *(p + 1) != '\0')
+                    {
+                        p++;
+                        *write++ = *p++;
+                    }
+                    else if (*p == quote)
+                        break;
+                    else
+                        *write++ = *p++;
+                }
                 if (*p == quote)
-                    p++; // skip closing quote
+                    p++;
             }
             else if (isspace((unsigned char)*p))
-            {
-                break; // end of token
-            }
+                break;
             else
-            {
                 *write++ = *p++;
-            }
         }
         *write = '\0'; // null-terminate token
 
@@ -138,10 +296,26 @@ CommandInfo parse_input(char *input_str)
     }
 
     info.args[info.arg_count] = NULL;
+    int new_count = 0;
+    for (int i = 0; i < info.arg_count; i++)
+    {
+        if (strcmp(info.args[i], ">>") == 0 && i + 1 < info.arg_count)
+            info.redirect_append = info.args[++i];
+        else if (strcmp(info.args[i], ">") == 0 && i + 1 < info.arg_count)
+            info.redirect_out = info.args[++i];
+        else if (strcmp(info.args[i], "<") == 0 && i + 1 < info.arg_count)
+            info.redirect_in = info.args[++i];
+        else
+            info.args[new_count++] = info.args[i];
+    }
+    info.arg_count = new_count;
+    info.args[new_count] = NULL;
+    if (new_count > 0)
+        info.command = info.args[0];
     return info;
 }
 
-bool arg_matches(char *argvi, char *shortarg, char *longarg)
+bool arg_matches(const char *argvi, const char *shortarg, const char *longarg)
 {
     if (shortarg != NULL && (strcmp(argvi, shortarg) == 0))
     {
@@ -169,36 +343,37 @@ void help_command()
     printf("  debug       toggle debug messages\n");
 }
 
-void process_command(char *command, char *args[], int arg_count, sebsh *state)
+void process_command(CommandInfo *info, sebsh *state)
 {
-    if (command == NULL)
+
+    if (info->command == NULL)
         return;
 
     if (state->debug)
     {
-        printf("Command is %s \n", command);
-        for (int i = 0; i < arg_count; i++)
+        printf("Command is %s \n", info->command);
+        for (int i = 0; i < info->arg_count; i++)
         {
-            printf("Arg %d: %s\n", i, args[i]);
+            printf("Arg %d: %s\n", i, info->args[i]);
         }
     }
 
-    if (strcmp(command, "help") == 0)
+    if (strcmp(info->command, "help") == 0)
     {
         help_command();
     }
-    else if (strcmp(command, "ver") == 0)
+    else if (strcmp(info->command, "ver") == 0)
     {
         about_command();
     }
-    else if (strcmp(command, "exit") == 0 || strcmp(command, "quit") == 0)
+    else if (strcmp(info->command, "exit") == 0 || strcmp(info->command, "quit") == 0)
     {
         printf("exit\n");
         state->running = false;
     }
-    else if (strcmp(command, "cd") == 0)
+    else if (strcmp(info->command, "cd") == 0)
     {
-        const char *dir = args[1];
+        const char *dir = info->args[1];
 
         if (dir == NULL)
         {
@@ -221,14 +396,14 @@ void process_command(char *command, char *args[], int arg_count, sebsh *state)
         }
 #endif
     }
-    else if (strcmp(command, "debug") == 0)
+    else if (strcmp(info->command, "debug") == 0)
     {
         state->debug = !state->debug;
         printf("Debug messages are now %s.\n", state->debug ? "enabled" : "disabled");
     }
     else
     {
-        spawn_process(command, args);
+        spawn_process(info->command, info->args, info->redirect_in, info->redirect_out, info->redirect_append);
     }
 }
 
@@ -257,14 +432,13 @@ char *join_args(int argc, char **argv, int i)
 
 int main(int argc, char *argv[])
 {
+    char command[CMD_SIZE] = {0};
+    CommandInfo result;
     sebsh state = {
         .running = true,
         .debug = false,
         .cwd = {0},
         .prompt = " #> "};
-
-    char command[CMD_SIZE];
-    CommandInfo result;
 
     for (int i = 1; i < argc; i++)
     {
@@ -280,15 +454,35 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "sebsh: -c requires a command\n");
                 return 1;
             }
-            char *joined = join_args(argc, argv, i + 1);
+            char *joined = join_args(argc, argv, i + 1); // build command string
             if (joined == NULL)
             {
                 state.running = false;
                 break;
             }
-            result = parse_input(trim(joined));
             i = argc;
-            process_command(result.command, result.args, result.arg_count, &state);
+
+            char *segments[MAX_PIPE_SEGMENTS];
+            int seg_count = split_pipe(trim(joined), segments, MAX_PIPE_SEGMENTS);
+
+            if (seg_count == 1)
+            {
+                result = parse_input(segments[0]);
+                if (result.command != NULL)
+                    process_command(&result, &state);
+            }
+            else
+            {
+#ifdef _WIN32
+                fprintf(stderr, "sebsh: piping not supported on Windows\n");
+#else
+                CommandInfo pipeline[MAX_PIPE_SEGMENTS];
+                for (int j = 0; j < seg_count; j++)
+                    pipeline[j] = parse_input(trim(segments[j]));
+                execute_pipeline(pipeline, seg_count);
+#endif
+            }
+
             free(joined);
             state.running = false;
         }
@@ -314,10 +508,25 @@ int main(int argc, char *argv[])
             break;
         }
 
-        result = parse_input(trim(command));
-        if (result.command != NULL)
+        char *segments[MAX_PIPE_SEGMENTS];
+        int seg_count = split_pipe(trim(command), segments, MAX_PIPE_SEGMENTS);
+
+        if (seg_count == 1)
         {
-            process_command(result.command, result.args, result.arg_count, &state);
+            result = parse_input(segments[0]);
+            if (result.command != NULL)
+                process_command(&result, &state);
+        }
+        else
+        {
+#ifdef _WIN32
+            fprintf(stderr, "sebsh: piping not supported on Windows\n");
+#else
+            CommandInfo pipeline[MAX_PIPE_SEGMENTS];
+            for (int j = 0; j < seg_count; j++)
+                pipeline[j] = parse_input(trim(segments[j]));
+            execute_pipeline(pipeline, seg_count);
+#endif
         }
         fflush(stdout);
     }
