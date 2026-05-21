@@ -21,7 +21,19 @@
 #define CMD_SIZE 4096
 #define MAX_ARGS 100
 
-bool debug = false;
+typedef struct
+{
+    bool debug;
+    bool running;
+    char *cwd;
+} sebsh;
+
+typedef struct
+{
+    char *command;
+    char *args[MAX_ARGS];
+    int arg_count;
+} CommandInfo;
 
 // Cross-platform process spawn function
 int spawn_process(const char *path, char *const argv[])
@@ -70,13 +82,6 @@ char *trim(char *str)
     end[1] = '\0';
     return str;
 }
-
-typedef struct
-{
-    char *command;
-    char *args[MAX_ARGS];
-    int arg_count;
-} CommandInfo;
 
 CommandInfo parse_input(char *input_str)
 {
@@ -163,12 +168,12 @@ void help_command()
     printf("  debug       toggle debug messages\n");
 }
 
-void process_command(char *command, char *args[], int arg_count, bool *running)
+void process_command(char *command, char *args[], int arg_count, sebsh state)
 {
     if (command == NULL)
         return;
 
-    if (debug)
+    if (state.debug)
     {
         printf("Command is %s \n", command);
         for (int i = 0; i < arg_count; i++)
@@ -188,7 +193,7 @@ void process_command(char *command, char *args[], int arg_count, bool *running)
     else if (strcmp(command, "exit") == 0 || strcmp(command, "quit") == 0)
     {
         printf("exit\n");
-        *running = false;
+        state.running = false;
     }
     else if (strcmp(command, "cd") == 0)
     {
@@ -217,8 +222,8 @@ void process_command(char *command, char *args[], int arg_count, bool *running)
     }
     else if (strcmp(command, "debug") == 0)
     {
-        debug = !debug;
-        printf("Debug messages are now %s.\n", debug ? "enabled" : "disabled");
+        state.debug = !state.debug;
+        printf("Debug messages are now %s.\n", state.debug ? "enabled" : "disabled");
     }
     else
     {
@@ -251,7 +256,13 @@ char *join_args(int argc, char **argv, int i)
 
 int main(int argc, char *argv[])
 {
-    bool running = true;
+    sebsh state = {
+        .debug = false,
+        .running = true,
+        .cwd = {0}};
+
+    state.running = true;
+    state.debug = false;
     char cwd[FILENAME_MAX];
     char command[CMD_SIZE];
     CommandInfo result;
@@ -273,14 +284,15 @@ int main(int argc, char *argv[])
             char *joined = join_args(argc, argv, i + 1);
             if (joined == NULL)
             {
-                running = false;
+                free(joined);
+                state.running = false;
                 break;
             }
             result = parse_input(trim(joined));
             i = argc;
-            process_command(result.command, result.args, result.arg_count, &running);
+            process_command(result.command, result.args, result.arg_count, state);
             free(joined);
-            running = false;
+            state.running = false;
         }
         else
         {
@@ -288,7 +300,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    while (running)
+    while (state.running)
     {
         if (GETCWD(cwd, sizeof(cwd)) == NULL)
         {
@@ -307,7 +319,7 @@ int main(int argc, char *argv[])
         result = parse_input(trim(command));
         if (result.command != NULL)
         {
-            process_command(result.command, result.args, result.arg_count, &running);
+            process_command(result.command, result.args, result.arg_count, state);
         }
         fflush(stdout);
     }
