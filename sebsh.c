@@ -263,7 +263,6 @@ int main(int argc, char *argv[])
 
     state.running = true;
     state.debug = false;
-    char cwd[FILENAME_MAX];
     char command[CMD_SIZE];
     CommandInfo result;
 
@@ -302,12 +301,12 @@ int main(int argc, char *argv[])
 
     while (state.running)
     {
-        if (GETCWD(cwd, sizeof(cwd)) == NULL)
+        if (GETCWD(state.cwd, sizeof(state.cwd)) == NULL)
         {
             perror("GETCWD");
             return 1;
         }
-        printf("%s> ", cwd);
+        printf("%s> ", state.cwd);
         fflush(stdout);
 
         if (fgets(command, sizeof(command), stdin) == NULL)
