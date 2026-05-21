@@ -1,0 +1,13 @@
+# .gitignore for sebsh
+# VS Code
+.vscode
+
+# Compiled on Windows
+*.exe
+*.pdb
+sebsh.obj
+sebsh.ilk
+
+# Compiled on linux
+sebsh.out
+sebsh
