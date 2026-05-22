@@ -283,6 +283,7 @@ CommandInfo parse_input(char *input_str)
             else
                 *write++ = *p++;
         }
+        char delimiter = *p;
         *write = '\0'; // null-terminate token
 
         if (write > token_start || p > token_start)
@@ -292,7 +293,7 @@ CommandInfo parse_input(char *input_str)
             info.args[info.arg_count++] = token_start;
         }
 
-        if (isspace((unsigned char)*p))
+        if (isspace((unsigned char)delimiter))
             p++; // step past space that ended token
     }
 
