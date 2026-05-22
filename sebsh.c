@@ -10,6 +10,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <process.h>
+#include <io.h>
 #define GETCWD _getcwd
 #else
 #include <unistd.h>
@@ -336,12 +337,58 @@ void about_command()
 void help_command()
 {
     printf("sebsh - builtin commands:\n");
-    printf("  help        show this help message\n");
-    printf("  ver         show version\n");
-    printf("  exit/quit   exit the shell\n");
-    printf("  cd <dir>    change directory\n");
-    printf("  debug       toggle debug messages\n");
+    printf("  help           show this help message\n");
+    printf("  ver            show version\n");
+    printf("  exit/quit      exit the shell\n");
+    printf("  cd <dir>       change directory\n");
+    printf("  debug          toggle debug messages\n");
+#ifdef _WIN32 // Because on windows, these aren't executables
+    printf("  ls [dir] [-r]  list directory contents\n");
+    printf("  dir [dir] [-r] functions the same as ls\n");
+    printf("  echo [message] echoes a message\n");
+    printf("  clear          clear the screen\n");
+#endif
 }
+
+#ifdef _WIN32
+void list_directory(const char *path, bool recursive)
+{
+    if (path == NULL || *path == '\0')
+        path = ".";
+
+    char search_path[FILENAME_MAX];
+    size_t len = strlen(path);
+    if (len > 0 && (path[len - 1] == '\\' || path[len - 1] == '/'))
+        snprintf(search_path, sizeof(search_path), "%s*", path);
+    else
+        snprintf(search_path, sizeof(search_path), "%s\\*", path);
+
+    struct _finddata_t fileinfo;
+    intptr_t handle = _findfirst(search_path, &fileinfo);
+    if (handle == -1)
+    {
+        perror(path);
+        return;
+    }
+
+    do
+    {
+        if (strcmp(fileinfo.name, ".") == 0 || strcmp(fileinfo.name, "..") == 0)
+            continue;
+
+        printf("%s\n", fileinfo.name);
+
+        if (recursive && (fileinfo.attrib & _A_SUBDIR))
+        {
+            char subdir[FILENAME_MAX];
+            snprintf(subdir, sizeof(subdir), "%s\\%s", path, fileinfo.name);
+            list_directory(subdir, true);
+        }
+    } while (_findnext(handle, &fileinfo) == 0);
+
+    _findclose(handle);
+}
+#endif
 
 void process_command(CommandInfo *info, sebsh *state)
 {
@@ -401,6 +448,35 @@ void process_command(CommandInfo *info, sebsh *state)
         state->debug = !state->debug;
         printf("Debug messages are now %s.\n", state->debug ? "enabled" : "disabled");
     }
+#ifdef _WIN32
+    else if (strcmp(info->command, "ls") == 0 || strcmp(info->command, "dir") == 0)
+    {
+        bool recursive = false;
+        const char *dir = NULL;
+        for (int i = 1; i < info->arg_count; i++)
+        {
+            if (strcmp(info->args[i], "-r") == 0)
+                recursive = true;
+            else
+                dir = info->args[i];
+        }
+        list_directory(dir, recursive);
+    }
+    else if (strcmp(info->command, "echo") == 0)
+    {
+        for (int i = 1; i < info->arg_count; i++)
+        {
+            if (i > 1)
+                putchar(' ');
+            fputs(info->args[i], stdout);
+        }
+        putchar('\n');
+    }
+    else if (strcmp(info->command, "clear") == 0)
+    {
+        system("cls");
+    }
+#endif
     else
     {
         spawn_process(info->command, info->args, info->redirect_in, info->redirect_out, info->redirect_append);
