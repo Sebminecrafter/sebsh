@@ -5,9 +5,10 @@
 # Compiled on Windows
 *.exe
 *.pdb
-sebsh.obj
-sebsh.ilk
+*.obj
+*.ilk
 
 # Compiled on linux
-sebsh.out
+*.out
+*.o
 sebsh

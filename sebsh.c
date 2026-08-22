@@ -6,6 +6,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -23,6 +25,19 @@
 #define CMD_SIZE 4096
 #define MAX_ARGS 100
 #define MAX_PIPE_SEGMENTS 16
+
+static volatile sig_atomic_t interrupt_requested = 0;
+
+void handle_interrupt(int signal_number)
+{
+    (void)signal_number;
+    interrupt_requested = 1;
+#ifdef _WIN32
+    _write(_fileno(stdout), "\n", 1);
+#else
+    write(STDOUT_FILENO, "\n", 1);
+#endif
+}
 
 typedef struct
 {
@@ -61,6 +76,7 @@ int spawn_process(const char *path, char *const argv[], const char *redirect_in,
     }
     if (pid == 0)
     {
+        signal(SIGINT, SIG_DFL);
         if (redirect_in)
         {
             int fd = open(redirect_in, O_RDONLY);
@@ -99,8 +115,12 @@ int spawn_process(const char *path, char *const argv[], const char *redirect_in,
         exit(EXIT_FAILURE);
     }
     int status;
-    waitpid(pid, &status, 0);
-    return WEXITSTATUS(status);
+    while (waitpid(pid, &status, 0) < 0)
+    {
+        if (errno != EINTR)
+            return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 #endif
 }
 
@@ -154,6 +174,7 @@ void execute_pipeline(CommandInfo *infos, int count)
         }
         if (pid == 0)
         {
+            signal(SIGINT, SIG_DFL);
             if (i > 0)
                 dup2(pipes[i - 1][0], STDIN_FILENO);
             else if (infos[i].redirect_in)
@@ -210,7 +231,11 @@ void execute_pipeline(CommandInfo *infos, int count)
         close(pipes[i][1]);
     }
     for (int i = 0; i < count; i++)
-        wait(NULL);
+    {
+        int status;
+        while (wait(&status) < 0 && errno == EINTR)
+            continue;
+    }
 }
 #endif
 
@@ -517,6 +542,8 @@ int main(int argc, char *argv[])
         .cwd = {0},
         .prompt = " #> "};
 
+    signal(SIGINT, handle_interrupt);
+
     for (int i = 1; i < argc; i++)
     {
         if (arg_matches(argv[i], "-v", "--version"))
@@ -571,6 +598,7 @@ int main(int argc, char *argv[])
 
     while (state.running)
     {
+        interrupt_requested = 0;
         if (GETCWD(state.cwd, sizeof(state.cwd)) == NULL)
         {
             perror("GETCWD");
@@ -581,9 +609,17 @@ int main(int argc, char *argv[])
 
         if (fgets(command, sizeof(command), stdin) == NULL)
         {
+            if (interrupt_requested && !feof(stdin))
+            {
+                clearerr(stdin);
+                interrupt_requested = 0;
+                continue;
+            }
             printf("\n");
             break;
         }
+
+        interrupt_requested = 0;
 
         char *segments[MAX_PIPE_SEGMENTS];
         int seg_count = split_pipe(trim(command), segments, MAX_PIPE_SEGMENTS);
