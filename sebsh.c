@@ -18,7 +18,33 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <termios.h>
 #define GETCWD getcwd
+
+// Save so it can restore on exit
+static struct termios saved_termios;
+static int termios_saved = 0;
+
+static void restore_termios(void)
+{
+    if (termios_saved)
+        tcsetattr(STDIN_FILENO, TCSANOW, &saved_termios);
+}
+
+// Suppress ECHOCTL so '^C' doesn't echo on screen (visible on tty/framebuffer/etc.)
+static void suppress_echoctl(void)
+{
+    struct termios t;
+    if (tcgetattr(STDIN_FILENO, &t) < 0)
+        return;
+    saved_termios = t;
+    termios_saved = 1;
+    atexit(restore_termios);
+#ifdef ECHOCTL
+    t.c_lflag &= ~(tcflag_t)ECHOCTL;
+#endif
+    tcsetattr(STDIN_FILENO, TCSANOW, &t);
+}
 #endif
 
 #define VER "1.0.0"
@@ -76,7 +102,10 @@ int spawn_process(const char *path, char *const argv[], const char *redirect_in,
     }
     if (pid == 0)
     {
+        setpgid(0, 0);
         signal(SIGINT, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
         if (redirect_in)
         {
             int fd = open(redirect_in, O_RDONLY);
@@ -114,12 +143,18 @@ int spawn_process(const char *path, char *const argv[], const char *redirect_in,
         perror("execvp");
         exit(EXIT_FAILURE);
     }
+    setpgid(pid, pid);
+    if (isatty(STDIN_FILENO))
+        tcsetpgrp(STDIN_FILENO, pid);
     int status;
     while (waitpid(pid, &status, 0) < 0)
     {
         if (errno != EINTR)
-            return -1;
+            break;
     }
+    if (isatty(STDIN_FILENO))
+        tcsetpgrp(STDIN_FILENO, getpgrp());
+
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
 #endif
 }
@@ -162,6 +197,9 @@ void execute_pipeline(CommandInfo *infos, int count)
         }
     }
 
+    pid_t pipeline_pgid = 0; /* all pipeline children share one pgid */
+    pid_t pids[MAX_PIPE_SEGMENTS] = {0};
+
     for (int i = 0; i < count; i++)
     {
         if (infos[i].command == NULL)
@@ -174,7 +212,10 @@ void execute_pipeline(CommandInfo *infos, int count)
         }
         if (pid == 0)
         {
+            setpgid(0, pipeline_pgid == 0 ? 0 : pipeline_pgid);
             signal(SIGINT, SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
             if (i > 0)
                 dup2(pipes[i - 1][0], STDIN_FILENO);
             else if (infos[i].redirect_in)
@@ -223,6 +264,18 @@ void execute_pipeline(CommandInfo *infos, int count)
             perror("execvp");
             exit(EXIT_FAILURE);
         }
+        if (pipeline_pgid == 0)
+        {
+            pipeline_pgid = pid;
+            setpgid(pid, pid); /* race-free mirror of child setpgid */
+            if (isatty(STDIN_FILENO))
+                tcsetpgrp(STDIN_FILENO, pipeline_pgid);
+        }
+        else
+        {
+            setpgid(pid, pipeline_pgid);
+        }
+        pids[i] = pid;
     }
 
     for (int i = 0; i < count - 1; i++)
@@ -232,10 +285,14 @@ void execute_pipeline(CommandInfo *infos, int count)
     }
     for (int i = 0; i < count; i++)
     {
+        if (pids[i] == 0)
+            continue;
         int status;
-        while (wait(&status) < 0 && errno == EINTR)
+        while (waitpid(pids[i], &status, 0) < 0 && errno == EINTR)
             continue;
     }
+    if (isatty(STDIN_FILENO))
+        tcsetpgrp(STDIN_FILENO, getpgrp());
 }
 #endif
 
@@ -543,6 +600,12 @@ int main(int argc, char *argv[])
         .prompt = " #> "};
 
     signal(SIGINT, handle_interrupt);
+#ifndef _WIN32
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    suppress_echoctl();
+#endif
 
     for (int i = 1; i < argc; i++)
     {
