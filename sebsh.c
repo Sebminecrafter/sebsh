@@ -1,6 +1,7 @@
 // sebsh, by Sebminecrafter
 // sebsh © 2026 by Sebminecrafter is licensed under CC BY-SA 4.0. To view a copy of this license, visit https://creativecommons.org/licenses/by-sa/4.0/
 
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #define GETCWD _getcwd
 #else
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <termios.h>
@@ -45,6 +47,25 @@ static void suppress_echoctl(void)
 #endif
     tcsetattr(STDIN_FILENO, TCSANOW, &t);
 }
+
+// Ensure sebsh is session leader
+static void acquire_controlling_tty(void)
+{
+    if (!isatty(STDIN_FILENO))
+        return;
+
+    if (getsid(0) != getpid())
+    {
+        if (setsid() < 0)
+            return;
+    }
+
+#ifdef TIOCSCTTY
+    (void)ioctl(STDIN_FILENO, TIOCSCTTY, 0);
+#endif
+
+    (void)tcsetpgrp(STDIN_FILENO, getpgrp());
+}
 #endif
 
 #define VER "1.0.0"
@@ -54,6 +75,10 @@ static void suppress_echoctl(void)
 
 static volatile sig_atomic_t interrupt_requested = 0;
 
+#ifndef _WIN32
+static volatile sig_atomic_t foreground_child_pid = 0;
+#endif
+
 void handle_interrupt(int signal_number)
 {
     (void)signal_number;
@@ -61,7 +86,11 @@ void handle_interrupt(int signal_number)
 #ifdef _WIN32
     _write(_fileno(stdout), "\n", 1);
 #else
-    write(STDOUT_FILENO, "\n", 1);
+    pid_t child = foreground_child_pid;
+    if (child > 0)
+        kill(-child, SIGINT);
+    else
+        write(STDOUT_FILENO, "\n", 1);
 #endif
 }
 
@@ -144,14 +173,16 @@ int spawn_process(const char *path, char *const argv[], const char *redirect_in,
         exit(EXIT_FAILURE);
     }
     setpgid(pid, pid);
+    foreground_child_pid = pid;
     if (isatty(STDIN_FILENO))
         tcsetpgrp(STDIN_FILENO, pid);
-    int status;
+    int status = 0;
     while (waitpid(pid, &status, 0) < 0)
     {
         if (errno != EINTR)
             break;
     }
+    foreground_child_pid = 0;
     if (isatty(STDIN_FILENO))
         tcsetpgrp(STDIN_FILENO, getpgrp());
 
@@ -267,7 +298,8 @@ void execute_pipeline(CommandInfo *infos, int count)
         if (pipeline_pgid == 0)
         {
             pipeline_pgid = pid;
-            setpgid(pid, pid); /* race-free mirror of child setpgid */
+            setpgid(pid, pid);
+            foreground_child_pid = pipeline_pgid;
             if (isatty(STDIN_FILENO))
                 tcsetpgrp(STDIN_FILENO, pipeline_pgid);
         }
@@ -291,6 +323,7 @@ void execute_pipeline(CommandInfo *infos, int count)
         while (waitpid(pids[i], &status, 0) < 0 && errno == EINTR)
             continue;
     }
+    foreground_child_pid = 0;
     if (isatty(STDIN_FILENO))
         tcsetpgrp(STDIN_FILENO, getpgrp());
 }
@@ -604,6 +637,7 @@ int main(int argc, char *argv[])
     signal(SIGTTOU, SIG_IGN);
     signal(SIGTTIN, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
+    acquire_controlling_tty();
     suppress_echoctl();
 #endif
 
